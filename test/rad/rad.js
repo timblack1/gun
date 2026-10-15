@@ -146,6 +146,165 @@ var names = ["Adalard","Adora","Aia","Albertina","Alfie","Allyn","Amabil","Ammam
         expect(tmp).to.be(7);
         done();
     });
+
+    it('radix primitive leaf values (numbers, booleans, strings, null)', function(done){
+        var r = Radix();
+        var data = [
+            ['count', 42],
+            ['zero', 0],
+            ['negative', -17],
+            ['float', 3.14159],
+            ['enabled', true],
+            ['disabled', false],
+            ['text', 'hello world'],
+            ['empty', ''],
+            ['nothing', null]
+        ];
+
+        data.forEach(function(pair){
+            r(pair[0], pair[1]);
+        });
+
+        // Test direct lookup non-corruption
+        data.forEach(function(pair){
+            expect(r(pair[0])).to.be(pair[1]);
+        });
+
+        // Test map traversal non-corruption
+        var mapped = {};
+        Radix.map(r, function(val, key){
+            mapped[key] = val;
+        });
+
+        data.forEach(function(pair){
+            expect(mapped[pair[0]]).to.be(pair[1]);
+        });
+        expect(Object.keys(mapped).length).to.be(data.length);
+        done();
+    });
+
+    it('radix primitive branch skipping in strict mode', function(done){
+        // In strict mode (ES modules, bundled builds), assigning properties to primitives throws TypeError.
+        // Radix.map must safely ignore primitive branch nodes without throwing or logging TypeError.
+        var fs = require('fs');
+        var path = require('path');
+        var radixSrc = fs.readFileSync(path.join(__dirname, '../../lib/radix.js'), 'utf8');
+        var loader = new Function('module', 'exports', '"use strict";\n' + radixSrc);
+        var mod = { exports: {} };
+        loader(mod, mod.exports);
+        var StrictRadix = mod.exports;
+
+        var restructuringTree = {
+            user: {
+                '': 'usr_alice',
+                age: 30,
+                score: 99.4,
+                active: true,
+                profile: {
+                    '': 'profile_data',
+                    verified: false,
+                    stars: 5
+                }
+            }
+        };
+
+        var visited = [];
+        var errorCount = 0;
+        var origError = console.error;
+        var origLog = console.log;
+        var intercept = function(err){
+            if((err instanceof Error) || String(err).indexOf('TypeError') !== -1 || String(err).indexOf('Cannot create property') !== -1){
+                errorCount++;
+            }
+        };
+        console.error = intercept;
+        console.log = intercept;
+
+        try {
+            StrictRadix.map(restructuringTree, function(val, key){
+                visited.push({key: key, val: val});
+            });
+        } finally {
+            console.error = origError;
+            console.log = origLog;
+        }
+
+        expect(errorCount).to.be(0);
+        expect(visited.length).to.be(2);
+        expect(visited[0].key).to.be('user');
+        expect(visited[0].val).to.be('usr_alice');
+        expect(visited[1].key).to.be('userprofile');
+        expect(visited[1].val).to.be('profile_data');
+        done();
+    });
+
+    it('radix mixed primitive traversal & ordering', function(done){
+        var r = Radix();
+        r('item/1/count', 10);
+        r('item/1/name', 'Widget A');
+        r('item/1/valid', true);
+        r('item/2/count', 20);
+        r('item/2/name', 'Widget B');
+        r('item/2/valid', false);
+
+        var forward = [];
+        Radix.map(r, function(val, key){
+            forward.push(key + '=' + val);
+        });
+
+        var reverse = [];
+        Radix.map(r, function(val, key){
+            reverse.push(key + '=' + val);
+        }, {reverse: 1});
+
+        expect(forward.length).to.be(6);
+        expect(reverse.length).to.be(6);
+        expect(reverse).to.eql(forward.slice(0).reverse());
+
+        // Range boundary filtering
+        var sub = [];
+        Radix.map(r, function(val, key){
+            sub.push(key + '=' + val);
+        }, {start: 'item/1/', end: 'item/1/\uffff'});
+
+        expect(sub.length).to.be(3);
+        expect(sub).to.eql([
+            'item/1/count=10',
+            'item/1/name=Widget A',
+            'item/1/valid=true'
+        ]);
+        done();
+    });
+
+    it('radix debug primitive branch assertion', function(done){
+        var debugRadix = require('../../lib/radix');
+        var oldDebug = debugRadix.debug;
+        debugRadix.debug = true;
+
+        var logged = [];
+        var origError = console.error;
+        console.error = function(err){
+            logged.push(err);
+        };
+
+        try {
+            debugRadix.map({ a: 42 }, function(){});
+            debugRadix.map({ a: true }, function(){});
+            debugRadix.map({ a: 'leaf_as_branch' }, function(){});
+        } finally {
+            console.error = origError;
+            debugRadix.debug = oldDebug;
+        }
+
+        expect(logged.length).to.be(3);
+        expect(logged[0][0]).to.be('BUG:');
+        expect(logged[0][1]).to.be(42);
+        expect(logged[1][0]).to.be('BUG:');
+        expect(logged[1][1]).to.be(true);
+        expect(logged[2][0]).to.be('BUG:');
+        expect(logged[2][1]).to.be('leaf_as_branch');
+        done();
+    });
   });
 
   if(Gun.window && !Gun.window.RindexedDB){ return }
@@ -314,6 +473,34 @@ var names = ["Adalard","Adora","Aia","Albertina","Alfie","Allyn","Amabil","Ammam
                 done();
             },100);
         }, {limit: 1});
+    });
+
+    it('write and read primitive types (numbers, booleans, strings)', function(done){
+        var items = {
+            'prim/num': 42,
+            'prim/zero': 0,
+            'prim/bool_true': true,
+            'prim/bool_false': false,
+            'prim/str': 'active'
+        };
+        var remaining = Object.keys(items).length;
+        Object.keys(items).forEach(function(k){
+            rad(k, items[k], function(err, ok){
+                expect(err).to.not.be.ok();
+                if(--remaining){ return }
+                rad('prim/', function(err, data){
+                    expect(err).to.not.be.ok();
+                    var readBack = {};
+                    Radix.map(data, function(v, key){
+                        readBack['prim/' + key] = v;
+                    });
+                    Object.keys(items).forEach(function(origKey){
+                        expect(readBack[origKey]).to.be(items[origKey]);
+                    });
+                    done();
+                });
+            });
+        });
     });
 
   });
